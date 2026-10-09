@@ -1,81 +1,253 @@
-from typing import Dict, List
-import db
-from datetime import datetime, timedelta
+import html
+import logging
 import math
-from pytz import timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Dict, Iterable, List, Optional
+
+import db
 import utils
-from constants import Machines, Status, STATUS, USER_ID, USER_USERNAME, START_TIME, CYCLE_TIME, SG_TZ, DEFAULT_CYCLE_TIME
+from constants import Machines, Status, STATUS, USER_ID, USER_USERNAME, START_TIME, CYCLE_TIME, DEFAULT_CYCLE_TIME
+from exceptions import MachineInUseError, NotOwnerError, InvalidStatusError
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for reading possibly-malformed machine records
+# ---------------------------------------------------------------------------
+
+def parse_status(record) -> Optional[Status]:
+    if not isinstance(record, dict):
+        return None
+    try:
+        return Status(record.get(STATUS))
+    except ValueError:
+        return None
+
+
+def parse_cycle_time(record) -> int:
+    value = record.get(CYCLE_TIME) if isinstance(record, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return DEFAULT_CYCLE_TIME
+    return int(value)
+
+
+def end_time(record) -> Optional[datetime]:
+    start = utils.parse_timestamp(record.get(START_TIME)) if isinstance(record, dict) else None
+    if start is None:
+        return None
+    return start + timedelta(minutes=parse_cycle_time(record))
+
+
+# ---------------------------------------------------------------------------
+# Status / keyboards
+# ---------------------------------------------------------------------------
+
+def build_status_message(statuses: Dict, now: Optional[datetime] = None) -> str:
+    now = now or utils.now_utc()
+    statuses = statuses if isinstance(statuses, dict) else {}
+    lines = []
+    for machine in Machines.get_values():
+        record = statuses.get(machine)
+        label = f"<b>{html.escape(utils.get_display_label(machine))}:</b>"
+        status = parse_status(record)
+        if status is None:
+            lines.append(f"{label} ❗️ Error (Status Unknown)")
+            continue
+        if status == Status.AVAILABLE:
+            lines.append(f"{label} ✅ Available")
+            continue
+
+        user = html.escape(utils.format_user(record.get(USER_USERNAME)))
+        finish = end_time(record)
+        if status == Status.IN_USE:
+            if finish is None:
+                lines.append(f"{label} ❌ In Use ({user})")
+            else:
+                time_left = max(0, math.ceil((finish - now).total_seconds() / 60))
+                mins = "min" if time_left == 1 else "mins"
+                lines.append(f"{label} ❌ In Use ({time_left} {mins} - {user})")
+        elif status == Status.DONE:
+            if finish is None:
+                lines.append(f"{label} ⏱️ Done ({user})")
+            else:
+                ended = utils.to_sg(finish).strftime('%d/%m/%y %I:%M%p')
+                lines.append(f"{label} ⏱️ Done ({ended} - {user})")
+    return "\n".join(lines) + "\n"
+
 
 def get_status() -> str:
-    statuses = db.get_statuses()
-    message = ""
-    for machine in statuses:
-        machine_text = utils.get_display_label(machine)
-        user = statuses[machine][USER_USERNAME]
-        time = datetime.fromisoformat(statuses[machine][START_TIME])
-        cycle_time = statuses[machine].get(CYCLE_TIME, DEFAULT_CYCLE_TIME)
+    return build_status_message(db.get_statuses())
 
-        try:
-            status = Status(statuses[machine][STATUS])
-            if status == Status.AVAILABLE:
-                message += f"<b>{machine_text}:</b> ✅ Available\n"
-            elif status == Status.IN_USE:
-                time_left = cycle_time - math.floor((datetime.now() - time).total_seconds() / 60)
-                time_left = time_left if time_left > 0 else 0
-                mins = "min" if time_left == 1 else "mins"
-                message += f"<b>{machine_text}:</b> ❌ In Use ({time_left} {mins} - @{user})\n"
-            elif status == Status.DONE:
-                time_ended = (time + timedelta(minutes=cycle_time)).astimezone(tz=timezone(SG_TZ))
-                message += f"<b>{machine_text}:</b> ⏱️ Done ({time_ended.strftime('%d/%m/%y %I:%M%p')} - @{user})\n"
-        except ValueError:
-            message += f"<b>{machine_text}:</b> ❗️ Error (Status Unknown)\n"
-    
-    return message
 
 def get_machines() -> List[Dict[str, str]]:
+    return [{"label": utils.get_display_label(machine), "value": machine} for machine in Machines.get_values()]
+
+
+def filter_machines(statuses: Dict, wanted: Iterable[Status], user_id=None) -> List[Dict[str, str]]:
+    statuses = statuses if isinstance(statuses, dict) else {}
+    wanted = set(wanted)
     options = []
     for machine in Machines.get_values():
-        options.append({
-            "label": utils.get_display_label(machine),
-            "value": machine
-        })
+        record = statuses.get(machine)
+        if parse_status(record) not in wanted:
+            continue
+        if user_id is not None and not utils.same_user(record.get(USER_ID), user_id):
+            continue
+        options.append({"label": utils.get_display_label(machine), "value": machine})
     return options
 
-def get_machines_with_options(status: List[Status], user_id: str = None) -> List[Dict[str, str]]:
-    machines = db.get_statuses()
-    options = []
-    for machine in machines:
-        if (Status(machines[machine][STATUS]) in status) and (user_id is None or machines[machine][USER_ID] == user_id):
-            options.append({
-                "label": utils.get_display_label(machine),
-                "value": machine
-            })
-    return options
 
-def get_user_id(machine) -> str:
+def get_machines_with_options(wanted: Iterable[Status], user_id=None) -> List[Dict[str, str]]:
+    return filter_machines(db.get_statuses(), wanted, user_id)
+
+
+def get_user_id(machine):
     utils.assert_valid_machine(machine)
     return db.get_user_id(machine)
 
-def use_machine(machine, id, username, cycle_time):
-    utils.assert_valid_machine(machine)
-    # If there are washers used by the user that is already done when the user uses a dryer, set the washer to available
-    if machine in Machines.get_dryers():
-        statuses = db.get_statuses()
-        washers = Machines.get_washers()
-        for stat_machine in statuses:
-            if stat_machine in washers and statuses[stat_machine][STATUS] == Status.DONE.value and statuses[stat_machine][USER_ID] == id:
-                set_status(stat_machine, Status.AVAILABLE)
-    db.use_machine(machine, id, username, cycle_time)
 
 def is_machine_in_use(machine) -> bool:
     utils.assert_valid_machine(machine)
-    return db.get_machine_status(machine) == Status.IN_USE.value
+    return parse_status(db.get_machine(machine)) == Status.IN_USE
 
-def set_status(machine, status: Status):
-    utils.assert_valid_machine(machine)
-    db.set_status(machine, status)
 
-def is_machine_used_by(machine, usr) -> bool:
+# ---------------------------------------------------------------------------
+# Claiming a machine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClaimResult:
+    machine: str
+    start_time: str
+    # Set when an explicit override displaced another user's running cycle
+    displaced_user_id: Optional[object] = None
+    cleared_washers: List[str] = field(default_factory=list)
+
+
+def apply_claim(current, machine, user_id, username, cycle_time, start_time, override=False):
+    """Pure transaction function body for claiming a machine.
+
+    Returns (new_record, displaced_user_id). Raises MachineInUseError when the
+    machine is in use and the user did not explicitly choose to override.
+    """
+    record = dict(current) if isinstance(current, dict) else {}
+    displaced = None
+    if parse_status(record) == Status.IN_USE:
+        if not override:
+            raise MachineInUseError(machine)
+        if not utils.same_user(record.get(USER_ID), user_id) and record.get(USER_ID) not in (None, ""):
+            displaced = record.get(USER_ID)
+    record.update({
+        STATUS: Status.IN_USE.value,
+        USER_ID: user_id,
+        USER_USERNAME: username,
+        START_TIME: start_time,
+        CYCLE_TIME: cycle_time,
+    })
+    return record, displaced
+
+
+def claim_machine(machine, user_id, username, cycle_time, override=False, now=None) -> ClaimResult:
     utils.assert_valid_machine(machine)
-    user = db.get_user_id(machine)
-    return user == usr
+    start_time = utils.to_iso(now or utils.now_utc())
+    outcome = {}
+
+    def txn(current):
+        record, displaced = apply_claim(current, machine, user_id, username, cycle_time, start_time, override)
+        outcome["displaced"] = displaced
+        return record
+
+    db.transact_machine(machine, txn)
+    result = ClaimResult(machine=machine, start_time=start_time, displaced_user_id=outcome.get("displaced"))
+
+    # Using a dryer means the user has collected their washing: release their DONE washers.
+    if utils.is_dryer(machine):
+        statuses = db.get_statuses()
+        own_done_washers = [option["value"] for option in filter_machines(statuses, [Status.DONE], user_id)
+                            if utils.is_washer(option["value"])]
+        for washer in own_done_washers:
+            try:
+                release_machine(washer, user_id, [Status.DONE])
+                result.cleared_washers.append(washer)
+            except (NotOwnerError, InvalidStatusError):
+                pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Releasing a machine (/done, /cancel)
+# ---------------------------------------------------------------------------
+
+def apply_release(current, machine, user_id, expected: Iterable[Status]):
+    """Pure transaction function body: set AVAILABLE if user owns it and status is expected."""
+    if not isinstance(current, dict) or not utils.same_user(current.get(USER_ID), user_id):
+        raise NotOwnerError(machine)
+    status = parse_status(current)
+    if status not in set(expected):
+        raise InvalidStatusError(machine, current.get(STATUS))
+    record = dict(current)
+    record[STATUS] = Status.AVAILABLE.value
+    return record
+
+
+def release_machine(machine, user_id, expected: Iterable[Status]):
+    utils.assert_valid_machine(machine)
+    expected = list(expected)
+    db.transact_machine(machine, lambda current: apply_release(current, machine, user_id, expected))
+
+
+# ---------------------------------------------------------------------------
+# Alarms
+# ---------------------------------------------------------------------------
+
+class _StaleSession(Exception):
+    pass
+
+
+def apply_mark_done(current, user_id, start_time):
+    """Pure transaction function body: IN_USE -> DONE only for the same session."""
+    if (
+        not isinstance(current, dict)
+        or parse_status(current) != Status.IN_USE
+        or not utils.same_user(current.get(USER_ID), user_id)
+        or current.get(START_TIME) != start_time
+    ):
+        raise _StaleSession()
+    record = dict(current)
+    record[STATUS] = Status.DONE.value
+    return record
+
+
+def mark_done_if_current(machine, user_id, start_time) -> bool:
+    """Mark a machine DONE if it is still the session identified by (user_id, start_time)."""
+    utils.assert_valid_machine(machine)
+    try:
+        db.transact_machine(machine, lambda current: apply_mark_done(current, user_id, start_time))
+        return True
+    except _StaleSession:
+        return False
+
+
+def compute_reschedule(statuses: Dict, now: Optional[datetime] = None) -> List[Dict]:
+    """Alarms to restore on startup: one per IN_USE machine, delay 0 if past due."""
+    now = now or utils.now_utc()
+    statuses = statuses if isinstance(statuses, dict) else {}
+    jobs = []
+    for machine in Machines.get_values():
+        record = statuses.get(machine)
+        if parse_status(record) != Status.IN_USE:
+            continue
+        user_id = record.get(USER_ID)
+        finish = end_time(record)
+        if user_id in (None, "") or finish is None:
+            logger.warning("Cannot reschedule alarm for %s: missing user_id or start_time", machine)
+            continue
+        jobs.append({
+            "machine": machine,
+            "user_id": user_id,
+            "start_time": record.get(START_TIME),
+            "delay": max(0.0, (finish - now).total_seconds()),
+        })
+    return jobs

@@ -1,102 +1,77 @@
-from typing import Dict
-import firebase_admin
+import logging
 import os
-from firebase_admin import db
-from datetime import datetime
-from constants import Status, STATUS, USER_ID, USER_USERNAME, START_TIME, CYCLE_TIME
+from typing import Callable, Dict, Optional
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db as rtdb
+
+from constants import USER_ID
+from utils import assert_valid_machine
+
+logger = logging.getLogger(__name__)
+
+# Firebase service-account fields, mapped from environment variables.
+REQUIRED_CREDENTIAL_ENV = {
+    "type": "TYPE",
+    "project_id": "PROJECT_ID",
+    "private_key_id": "PRIVATE_KEY_ID",
+    "private_key": "PRIVATE_KEY",
+    "client_email": "CLIENT_EMAIL",
+    "client_id": "CLIENT_ID",
+    "token_uri": "TOKEN_URI",
+}
+OPTIONAL_CREDENTIAL_ENV = {
+    "auth_uri": "AUTH_URI",
+    "auth_provider_x509_cert_url": "AUTH_PROVIDER_X509_CERT_URL",
+    "client_x509_cert_url": "CLIENT_X509_CERT_URL",
+    "universe_domain": "UNIVERSE_DOMAIN",
+}
+REQUIRED_ENV = ["DATABASE_URL", *REQUIRED_CREDENTIAL_ENV.values()]
+
 
 def setup_db():
-    print("Setting up Database...")
-    cred_obj = firebase_admin.credentials.Certificate(
-        {
-            "type": os.getenv("TYPE"),
-            "project_id": os.getenv("PROJECT_ID"),
-            "private_key_id": os.getenv("PRIVATE_KEY_ID"),
-            "private_key": os.getenv("PRIVATE_KEY").replace('\\n', '\n'),
-            "client_email": os.getenv("CLIENT_EMAIL"),
-            "client_id": os.getenv("CLIENT_ID"),
-            "auth_uri": os.getenv("AUTH_URI"),
-            "token_uri": os.getenv("TOKEN_URI"),
-            "auth_provider_x509_cert_url": os.getenv("AUTH_PROVIDER_X509_CERT_URL"),
-            "client_x509_cert_url": os.getenv("CLIENT_X509_CERT_URL"),
-            "universe_domain": os.getenv("UNIVERSE_DOMAIN")
-        }
-    )
-    default_app = firebase_admin.initialize_app(cred_obj, {
-        'databaseURL':os.getenv("DATABASE_URL")
+    logger.info("Setting up database...")
+    info = {key: os.environ[env] for key, env in REQUIRED_CREDENTIAL_ENV.items()}
+    info["private_key"] = info["private_key"].replace('\\n', '\n')
+    for key, env in OPTIONAL_CREDENTIAL_ENV.items():
+        if os.getenv(env):
+            info[key] = os.environ[env]
+    firebase_admin.initialize_app(credentials.Certificate(info), {
+        'databaseURL': os.environ["DATABASE_URL"],
     })
+    logger.info("Connected to database")
 
-    print("Connected to Database!")
+
+def _machine_ref(machine: str):
+    assert_valid_machine(machine)
+    return rtdb.reference(f"/machines/{machine}")
+
 
 def get_statuses() -> Dict:
-    print("Retrieving statuses...")
-    ref = db.reference("/machines")
-    status = ref.get()
-    print("Statuses retrieved!")
-    return status
+    """Return the /machines node, or {} if it is missing or malformed."""
+    statuses = rtdb.reference("/machines").get()
+    if not isinstance(statuses, dict):
+        if statuses is not None:
+            logger.warning("Unexpected /machines value of type %s", type(statuses).__name__)
+        return {}
+    return statuses
 
-def get_machine_status(machine) -> str:
-    print(f"Checking {machine} status...")
-    ref = db.reference(f"/machines/{machine}/{STATUS}")
-    status = ref.get()
-    print(f"Status for {machine} retrieved!")
-    return status
 
-def use_machine(machine, user_id, user_username, cycle_time):
-    print(f"Using {machine}...")
-    ref = db.reference(f"/machines/{machine}")
-    ref.update({
-        STATUS: Status.IN_USE.value,
-        USER_ID: user_id,
-        USER_USERNAME: user_username,
-        START_TIME: datetime.now().isoformat(),
-        CYCLE_TIME: cycle_time,
-    })
-    print(f"{machine} is now in use!")
+def transact_machine(machine: str, update_fn: Callable[[Optional[Dict]], Dict]) -> Dict:
+    """Atomically transform /machines/<machine>.
 
-def set_status(machine, status: Status):
-    print(f"Finishing {machine}...")
-    ref = db.reference(f"/machines/{machine}")
-    ref.update({
-        STATUS: status.value,
-    })
-    print(f"{machine} is now {status.value}!")
+    update_fn receives the current value (possibly None) and returns the new
+    value; raising inside update_fn aborts without writing.
+    """
+    logger.debug("Transaction on %s", machine)
+    return _machine_ref(machine).transaction(update_fn)
 
-def get_user_id(machine) -> str:
-    print(f"Retrieving user id for {machine}...")
-    ref = db.reference(f"/machines/{machine}/{USER_ID}")
-    user_id = ref.get()
-    print(f"User id for {machine} retrieved!")
-    return user_id
 
-# from datetime import datetime
-# setup_db()
-# ref = db.reference("/")
-# ref.set({
-#     "machines": {
-#         "washer_1": {
-#             "status": "AVAILABLE",
-#             "user_username": "",
-#             "user_id": "",
-#             "start_time": datetime.now().isoformat(),
-#         },
-#         "washer_2": {
-#             "status": "AVAILABLE",
-#             "user_username": "",
-#             "user_id": "",
-#             "start_time": datetime.now().isoformat(),
-#         },
-#         "dryer_1": {
-#             "status": "AVAILABLE",
-#             "user_username": "",
-#             "user_id": "",
-#             "start_time": datetime.now().isoformat(),
-#         },
-#         "dryer_2": {
-#             "status": "AVAILABLE",
-#             "user_username": "",
-#             "user_id": "",
-#             "start_time": datetime.now().isoformat(),
-#         }
-#     }
-# })
+def get_user_id(machine: str):
+    return _machine_ref(machine).child(USER_ID).get()
+
+
+def get_machine(machine: str) -> Optional[Dict]:
+    value = _machine_ref(machine).get()
+    return value if isinstance(value, dict) else None

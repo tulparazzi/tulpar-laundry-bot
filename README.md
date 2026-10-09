@@ -4,18 +4,17 @@ The Tulpar Laundry Bot is a Telegram Bot used to track realtime Laundry machine 
 
 ## Dependencies
 The following python version is used:
-* Python 3.7+ (Recommended Python 3.12)
+* Python 3.12 (the Docker image is based on `python:3.12-slim-bookworm`)
 
-The following Python packages are used:
+The following Python packages are used (exact versions are pinned in `requirements.txt`):
 * `python-telegram-bot[job-queue]`: Handling bot requests and integration with Telegram API
 * `firebase-admin`: Integration of the bot with Firebase Realtime Database
 * `python-dotenv`: Use of environment variables from `.env` file
-* `flask`[Only for Serverless]: Creating REST API endpoints for webhook
+* `tzdata`: Time zone data used to display times in Singapore time
 
 ## Services
-The following cloud services are used:
+The following services are used:
 * `Firebase Realtime Database`: Cloud database used to persist bot data
-* `Google Cloud Compute Engine`: Cloud service used to run bot's backend service in a VM server
 * `Telegram BotFather`: Telegram's bot management bot used to create and set up bot
 
 ## Bot Commands
@@ -35,14 +34,21 @@ Notify the user of a Washer or Dryer that their cycle has completed.
 ### `/done`
 Indicate that you have already removed your clothes after the machine is done.
 
-### `/clear`
-Clear your use of any machine in case of errors.
+### `/cancel`
+Cancel your use of any machine in case of errors.
 
 ### `/refund`
 Provides refund procedures.
 
 ### `/help`
 Help function
+
+## Configuration
+Copy `.env.example` to `.env` and fill in the values: the Telegram bot token (`TELEGRAM_TOKEN`),
+the Firebase Realtime Database URL (`DATABASE_URL`) and the fields of the Firebase service-account key.
+The bot exits with an error listing any missing required variables.
+
+Timestamps are stored in the database as UTC ISO-8601 strings and displayed in Singapore time.
 
 ## Running on Server
 
@@ -53,4 +59,14 @@ Help function
 4. To stop the bot, run `docker compose down`
 5. To update the bot, run `git pull` then `docker compose up -d --build`
 
-## Hosting on Serverless
+Reminders for machines in use are rescheduled from the database when the bot starts, so restarts and redeploys do not lose them.
+
+## Development
+Run the unit tests (they use an in-memory fake database and never contact Telegram or Firebase):
+```
+python -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
+`scripts/seed.py --yes` resets every machine in the configured database to `AVAILABLE`.

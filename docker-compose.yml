@@ -1,0 +1,6 @@
+services:
+  tulpar-laundry-bot:
+    build: .
+    container_name: tulpar-laundry-bot
+    restart: unless-stopped
+    env_file: .env

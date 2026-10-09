@@ -46,15 +46,11 @@ Help function
 
 ## Running on Server
 
-### Run Using Nohup
-1. Activate venv using `source venv/bin/activate`
-2. Run `nohup python3 app.py &` to run the bot in the background.
-
-### Run Using Tmux
-1. Run `tmux`
-2. Activate venv using `source venv/bin/activate`
-3. Run `python app.py`
-4. To detach session and run app in background, press `ctrl + b` then `d`
-5. To reattach session to read logs, run `tmux attach`
+### Run Using Docker Compose
+1. Make sure the `.env` file is in the project root
+2. Run `docker compose up -d --build` to build and run the bot in the background. It restarts automatically if it crashes or the server reboots.
+3. To read logs, run `docker compose logs -f`
+4. To stop the bot, run `docker compose down`
+5. To update the bot, run `git pull` then `docker compose up -d --build`
 
 ## Hosting on Serverless

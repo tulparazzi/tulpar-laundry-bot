@@ -1,6 +1,6 @@
-# Keys
 from enum import Enum
 
+# Database keys under /machines/<machine>/
 STATUS = "status"
 USER_USERNAME = "user_username"
 USER_ID = "user_id"
@@ -11,13 +11,19 @@ DEFAULT_CYCLE_TIME = 30
 
 SG_TZ = "Asia/Singapore"
 
-# Encoders
+CANCEL_CALLBACK = "cancel"
+
+
+# Callback data prefixes
 class Encoders(Enum):
     CONFIRM_ENCODER = "+"
     PING_ENCODER = "~"
     DONE_ENCODER = "-"
     CLEAR_ENCODER = "="
     CYCLE_ENCODER = "@"
+    # Cycle selection after the user explicitly chose to override a machine in use
+    OVERRIDE_CYCLE_ENCODER = "!"
+
 
 # Machines
 class Machines(Enum):
@@ -28,12 +34,12 @@ class Machines(Enum):
 
     @classmethod
     def get_values(cls):
-        return list(map(lambda machine: machine.value, cls))
-    
+        return [machine.value for machine in cls]
+
     @classmethod
     def get_washers(cls):
         return [cls.WASHER_1.value, cls.WASHER_2.value]
-    
+
     @classmethod
     def get_dryers(cls):
         return [cls.DRYER_1.value, cls.DRYER_2.value]
@@ -45,10 +51,12 @@ class Status(Enum):
     IN_USE = "IN_USE"
     DONE = "DONE"
 
+
 class WasherLoad(Enum):
     LIGHT = 30
     MEDIUM = 32
     HEAVY = 34
+
 
 class DryerTime(Enum):
     SHORT = 30

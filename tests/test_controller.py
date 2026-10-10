@@ -220,3 +220,13 @@ def test_missing_env(monkeypatch):
     monkeypatch.delenv("PRIVATE_KEY")
     monkeypatch.setenv("TELEGRAM_TOKEN", "")
     assert app.missing_env() == ["TELEGRAM_TOKEN", "PRIVATE_KEY"]
+
+
+def test_answer_timeout_does_not_abort_action(fake_db):
+    from telegram.error import TimedOut
+    fake_db.machines["washer_1"] = done(111)
+    update, context = make_update("-washer_1", make_user(111)), make_context()
+    update.callback_query.answer.side_effect = TimedOut()
+    run(controller.done_machine(update, context))
+    assert fake_db.machines["washer_1"]["status"] == "AVAILABLE"
+    assert edited_text(update) == "Your laundry in Washer 1 has been cleared!"

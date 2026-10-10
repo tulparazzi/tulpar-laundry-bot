@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from telegram import CallbackQuery, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
 import db
@@ -158,9 +158,18 @@ async def show_cycle_options(query: CallbackQuery, machine: str, override: bool)
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def safe_answer(query: CallbackQuery, text: str = None) -> None:
+    """Answer a callback query. If that fails (e.g. a network timeout) the user only sees the
+    button spinner for longer, so log it and carry on instead of aborting the action."""
+    try:
+        await query.answer(text=text)
+    except TelegramError as e:
+        logger.warning("Could not answer callback query: %r", e)
+
+
 async def use_machine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     machine = query.data
     utils.assert_valid_machine(machine)
     if await asyncio.to_thread(svc.is_machine_in_use, machine):
@@ -171,14 +180,14 @@ async def use_machine(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_use_machine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     machine = utils.decode_machine(query.data, Encoders.CONFIRM_ENCODER)
     await show_cycle_options(query, machine, override=True)
 
 
 async def set_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     override = query.data.startswith(Encoders.OVERRIDE_CYCLE_ENCODER.value)
     encoder = Encoders.OVERRIDE_CYCLE_ENCODER if override else Encoders.CYCLE_ENCODER
     machine, cycle_time = utils.decode_cycle(query.data, encoder)
@@ -215,7 +224,7 @@ async def set_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ping_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     machine = utils.decode_machine(query.data, Encoders.PING_ENCODER)
     user_id = await asyncio.to_thread(svc.get_user_id, machine)
     if user_id in (None, ""):
@@ -235,7 +244,7 @@ async def ping_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _release(update: Update, context: ContextTypes.DEFAULT_TYPE, encoder: Encoders, expected, success_text: str, wrong_status_text: str):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     machine = utils.decode_machine(query.data, encoder)
     machine_label = utils.get_display_label(machine)
     try:
@@ -262,16 +271,20 @@ async def cancel_machine(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     await query.edit_message_text(text="Your selection has been cancelled!")
 
 
 async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer(text="This option is no longer valid.")
+    await safe_answer(update.callback_query, "This option is no longer valid.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Error while handling an update", exc_info=context.error)
+    if isinstance(context.error, NetworkError):
+        # Transient Telegram connectivity problem (e.g. a timeout); a traceback adds nothing.
+        logger.warning("Telegram network error while handling an update: %r", context.error)
+    else:
+        logger.error("Error while handling an update", exc_info=context.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
             await context.bot.send_message(
@@ -287,7 +300,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def setup_bot(token: str) -> Application:
     logger.info("Setting up bot...")
-    application = ApplicationBuilder().token(token).post_init(reschedule_alarms).build()
+    application = (
+        ApplicationBuilder().token(token)
+        # PTB's 5s defaults are tight on a small shared VM; occasional slow connects caused timeouts
+        .connect_timeout(15).read_timeout(15).write_timeout(15)
+        .post_init(reschedule_alarms).build()
+    )
 
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('status', status))

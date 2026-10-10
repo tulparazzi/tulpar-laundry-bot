@@ -4,6 +4,8 @@ services:
     container_name: tulpar-laundry-bot
     restart: unless-stopped
     init: true
+    # Cap memory so a leak in one bot cannot starve the others on the shared 1GB server
+    mem_limit: 256m
     env_file: .env
     logging:
       driver: json-file

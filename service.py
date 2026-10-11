@@ -7,7 +7,8 @@ from typing import Dict, Iterable, List, Optional
 
 import db
 import utils
-from constants import Machines, Status, STATUS, USER_ID, USER_USERNAME, START_TIME, CYCLE_TIME, DEFAULT_CYCLE_TIME
+from constants import (Machines, Status, STATUS, USER_ID, USER_USERNAME, START_TIME, CYCLE_TIME, DEFAULT_CYCLE_TIME,
+                       OVERDUE_GRACE)
 from exceptions import MachineInUseError, NotOwnerError, InvalidStatusError
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,24 @@ def mark_done_if_current(machine, user_id, start_time) -> bool:
         return True
     except _StaleSession:
         return False
+
+
+def find_overdue(statuses: Dict, now: Optional[datetime] = None, grace_seconds: float = OVERDUE_GRACE) -> List[Dict]:
+    """IN_USE machines whose cycle ended more than grace_seconds ago, i.e. whose alarm was lost."""
+    now = now or utils.now_utc()
+    statuses = statuses if isinstance(statuses, dict) else {}
+    overdue = []
+    for machine in Machines.get_values():
+        record = statuses.get(machine)
+        if parse_status(record) != Status.IN_USE:
+            continue
+        user_id = record.get(USER_ID)
+        finish = end_time(record)
+        if user_id in (None, "") or finish is None:
+            continue
+        if (now - finish).total_seconds() > grace_seconds:
+            overdue.append({"machine": machine, "user_id": user_id, "start_time": record.get(START_TIME)})
+    return overdue
 
 
 def compute_reschedule(statuses: Dict, now: Optional[datetime] = None) -> List[Dict]:

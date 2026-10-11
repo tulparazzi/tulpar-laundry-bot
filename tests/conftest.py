@@ -35,8 +35,9 @@ class FakeDB:
 
 
 class FakeJob:
-    def __init__(self, callback, when, name, chat_id, data):
+    def __init__(self, callback, when, name, chat_id, data, job_kwargs=None, interval=None):
         self.callback, self.when, self.name, self.chat_id, self.data = callback, when, name, chat_id, data
+        self.job_kwargs, self.interval = job_kwargs or {}, interval
         self.removed = False
 
     def schedule_removal(self):
@@ -47,8 +48,13 @@ class FakeJobQueue:
     def __init__(self):
         self.jobs = []
 
-    def run_once(self, callback, when, name=None, chat_id=None, data=None, **_):
-        job = FakeJob(callback, when, name, chat_id, data)
+    def run_once(self, callback, when, name=None, chat_id=None, data=None, job_kwargs=None, **_):
+        job = FakeJob(callback, when, name, chat_id, data, job_kwargs)
+        self.jobs.append(job)
+        return job
+
+    def run_repeating(self, callback, interval, first=None, name=None, job_kwargs=None, **_):
+        job = FakeJob(callback, first, name, None, None, job_kwargs, interval)
         self.jobs.append(job)
         return job
 

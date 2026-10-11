@@ -200,3 +200,24 @@ def test_compute_reschedule_handles_none_and_missing_cycle_time():
     del record["cycle_time"]
     [job] = service.compute_reschedule({"washer_1": record}, now=NOW)
     assert job["delay"] == pytest.approx(20 * 60)  # default 30 min cycle
+
+
+def test_find_overdue_only_returns_in_use_machines_past_grace():
+    statuses = {
+        "washer_1": in_use(111, start_time="2026-10-09T09:30:00+00:00", cycle_time=30),  # ended 10:00, 10 min ago
+        "washer_2": in_use(222, start_time="2026-10-09T09:39:30+00:00", cycle_time=30),  # ended 30s ago: in grace
+        "dryer_1": in_use(333, start_time="2026-10-09T10:00:00+00:00", cycle_time=30),  # still running
+        "dryer_2": done(444, start_time="2026-10-09T08:00:00+00:00"),  # already DONE
+    }
+    assert service.find_overdue(statuses, now=NOW) == [
+        {"machine": "washer_1", "user_id": 111, "start_time": "2026-10-09T09:30:00+00:00"},
+    ]
+
+
+def test_find_overdue_skips_unowned_or_untimed_records():
+    statuses = {
+        "washer_1": in_use("", start_time="2026-10-09T08:00:00+00:00"),
+        "washer_2": {"status": "IN_USE", "user_id": 111},  # no start_time
+    }
+    assert service.find_overdue(statuses, now=NOW) == []
+    assert service.find_overdue(None, now=NOW) == []

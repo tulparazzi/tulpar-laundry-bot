@@ -8,7 +8,7 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandH
 import db
 import service as svc
 import utils
-from constants import Encoders, WasherLoad, DryerTime, Status, CANCEL_CALLBACK
+from constants import Encoders, WasherLoad, DryerTime, Status, CANCEL_CALLBACK, OVERDUE_SWEEP_INTERVAL
 from exceptions import MachineInUseError, NotOwnerError, InvalidStatusError
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,9 @@ def schedule_alarm(job_queue, machine: str, user_id, chat_id, start_time: str, d
         name=alarm_job_name(machine),
         chat_id=chat_id,
         data={"machine": machine, "user_id": user_id, "chat_id": chat_id, "start_time": start_time},
+        # APScheduler silently skips jobs that start >1s late by default; if the process stalls
+        # (e.g. while being swapped back in) the alarm must still run, just late.
+        job_kwargs={"misfire_grace_time": None},
     )
 
 
@@ -48,12 +51,43 @@ async def alarm(context: ContextTypes.DEFAULT_TYPE):
     if not await asyncio.to_thread(svc.mark_done_if_current, machine, data["user_id"], data["start_time"]):
         logger.info("Ignoring stale alarm for %s", machine)
         return
+    await notify_done(context.bot, data["chat_id"], machine)
+
+
+async def notify_done(bot, chat_id, machine: str):
     try:
-        await context.bot.send_message(
-            chat_id=data["chat_id"], text=f'Your laundry in {utils.get_display_label(machine)} is done!'
-        )
+        await bot.send_message(chat_id=chat_id, text=f'Your laundry in {utils.get_display_label(machine)} is done!')
     except TelegramError:
         logger.warning("Could not send done notification for %s", machine, exc_info=True)
+
+
+async def sweep_overdue(context: ContextTypes.DEFAULT_TYPE):
+    """Safety net: mark machines DONE whose alarm never ran (failed, skipped or lost on restart)."""
+    try:
+        statuses = await asyncio.to_thread(db.get_statuses)
+    except Exception:
+        logger.warning("Overdue sweep could not read machines", exc_info=True)
+        return
+    for item in svc.find_overdue(statuses):
+        machine = item["machine"]
+        try:
+            marked = await asyncio.to_thread(svc.mark_done_if_current, machine, item["user_id"], item["start_time"])
+        except Exception:
+            logger.warning("Overdue sweep could not update %s", machine, exc_info=True)
+            continue
+        if marked:
+            logger.warning("Marked %s DONE: its cycle ended but the alarm never ran", machine)
+            remove_alarms(context.job_queue, machine)
+            # The originating chat is not stored in the DB; notify the user privately.
+            await notify_done(context.bot, item["user_id"], machine)
+
+
+async def on_startup(application: Application):
+    await reschedule_alarms(application)
+    application.job_queue.run_repeating(
+        sweep_overdue, interval=OVERDUE_SWEEP_INTERVAL, first=OVERDUE_SWEEP_INTERVAL, name="sweep_overdue",
+        job_kwargs={"misfire_grace_time": None, "coalesce": True},
+    )
 
 
 async def reschedule_alarms(application: Application):
@@ -304,7 +338,7 @@ def setup_bot(token: str) -> Application:
         ApplicationBuilder().token(token)
         # PTB's 5s defaults are tight on a small shared VM; occasional slow connects caused timeouts
         .connect_timeout(15).read_timeout(15).write_timeout(15)
-        .post_init(reschedule_alarms).build()
+        .post_init(on_startup).build()
     )
 
     application.add_handler(CommandHandler('start', start))

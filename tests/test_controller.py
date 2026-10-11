@@ -230,3 +230,58 @@ def test_answer_timeout_does_not_abort_action(fake_db):
     run(controller.done_machine(update, context))
     assert fake_db.machines["washer_1"]["status"] == "AVAILABLE"
     assert edited_text(update) == "Your laundry in Washer 1 has been cleared!"
+
+
+# --- lost-alarm safety net ------------------------------------------------------
+
+def test_alarm_jobs_run_even_when_late(fake_db):
+    fake_db.machines["washer_1"] = dict(AVAILABLE)
+    update, context = make_update("@washer_1__LIGHT", make_user(111)), make_context()
+    run(controller.set_duration(update, context))
+    [job] = context.job_queue.active()
+    assert job.job_kwargs["misfire_grace_time"] is None
+
+
+def test_sweep_marks_overdue_machine_done_and_notifies_owner(fake_db):
+    fake_db.machines["washer_1"] = in_use(111, start_time="2000-01-01T00:00:00+00:00")
+    context = make_context()
+    controller.schedule_alarm(context.job_queue, "washer_1", 111, 999, "2000-01-01T00:00:00+00:00", 0)
+    run(controller.sweep_overdue(context))
+    assert fake_db.machines["washer_1"]["status"] == "DONE"
+    assert context.job_queue.get_jobs_by_name("alarm:washer_1") == []
+    context.bot.send_message.assert_awaited_once_with(chat_id=111, text="Your laundry in Washer 1 is done!")
+
+
+def test_sweep_ignores_running_and_done_machines(fake_db):
+    fake_db.machines.update({"washer_1": in_use(111, start_time="2999-01-01T00:00:00+00:00"), "dryer_1": done(222)})
+    context = make_context()
+    run(controller.sweep_overdue(context))
+    assert fake_db.machines["washer_1"]["status"] == "IN_USE"
+    context.bot.send_message.assert_not_awaited()
+
+
+def test_sweep_after_alarm_already_ran_does_not_notify_twice(fake_db):
+    fake_db.machines["washer_1"] = in_use(111, start_time="2000-01-01T00:00:00+00:00")
+    context = make_context()
+    run(controller.sweep_overdue(context))
+    run(controller.sweep_overdue(context))
+    context.bot.send_message.assert_awaited_once()
+
+
+def test_sweep_survives_db_errors(fake_db, monkeypatch):
+    def boom():
+        raise RuntimeError("firebase down")
+    monkeypatch.setattr(fake_db, "get_statuses", boom)
+    context = make_context()
+    run(controller.sweep_overdue(context))
+    context.bot.send_message.assert_not_awaited()
+
+
+def test_startup_reschedules_and_starts_sweep(fake_db):
+    fake_db.machines["washer_1"] = in_use(111, start_time="2000-01-01T00:00:00+00:00")
+    application = SimpleNamespace(job_queue=FakeJobQueue())
+    run(controller.on_startup(application))
+    names = {job.name: job for job in application.job_queue.active()}
+    assert set(names) == {"alarm:washer_1", "sweep_overdue"}
+    assert names["sweep_overdue"].interval == 60
+    assert names["sweep_overdue"].job_kwargs["misfire_grace_time"] is None

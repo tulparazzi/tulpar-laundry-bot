@@ -9,6 +9,11 @@ CYCLE_TIME = "cycle_time"
 
 DEFAULT_CYCLE_TIME = 30
 
+# Safety net for lost alarms: every OVERDUE_SWEEP_INTERVAL seconds, machines still IN_USE more than
+# OVERDUE_GRACE seconds after their cycle should have ended are marked DONE.
+OVERDUE_SWEEP_INTERVAL = 60
+OVERDUE_GRACE = 60
+
 SG_TZ = "Asia/Singapore"
 
 CANCEL_CALLBACK = "cancel"
